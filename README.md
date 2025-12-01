@@ -6,7 +6,6 @@
 </div>
 
 # MemGAS
-From Single to Multi-Granularity: Toward Long-Term Memory Association and Selection of Conversational Agents. [Arxiv](https://arxiv.org/pdf/2505.19549)
 
 ### Environment
     conda create -n memgas python=3.9
