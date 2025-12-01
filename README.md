@@ -1,3 +1,10 @@
+<div align="center">
+  <picture>
+    <source srcset="./assets/intro.png" media="(prefers-color-scheme: dark)">
+    <img src="./assets/intro.png" width="90%" height="90%" />
+  </picture>
+</div>
+
 # MemGAS
 From Single to Multi-Granularity: Toward Long-Term Memory Association and Selection of Conversational Agents. [Arxiv](https://arxiv.org/pdf/2505.19549)
 
