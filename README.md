@@ -7,12 +7,106 @@
 
 # MemGAS
 
+Our work has been accepted to **ICLR 2026**: *From Single to Multi-Granularity: Toward Long-Term Memory Association and Selection of Conversational Agents*.
+
 ### Environment
     conda create -n memgas python=3.9
     conda activate memgas
     pip install torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 --index-url https://download.pytorch.org/whl/cu121
     pip install -r requirements.txt
 
+## Quickly Start
+Basic memory APIs are wrapped in the new `quickstart/` directory, without changing the original reproduction code.
+
+### 1) Initialize
+```python
+from quickstart import MemGASMemory, MemoryConfig
+
+mem = MemGASMemory(
+    MemoryConfig(
+        storage_dir="./memgas_store",
+        embedder="contriever",          # contriever/mpnet/minilm/qaminilm
+        llm_provider="openai",          # openai or vllm
+        llm_model="gpt-4o-mini",
+        llm_api_key="YOUR_API_KEY",     # or use the OPENAI_API_KEY environment variable
+        llm_base_url="YOUR_BASE_URL",   # optional, for OpenAI-compatible services
+        default_mode="memgas",          # memgas/lite/session_level/...
+    )
+)
+```
+
+### 1.1) Serve a local model with vLLM
+Start a local OpenAI-compatible endpoint:
+```bash
+vllm serve Qwen/Qwen2.5-7B-Instruct --port 8000
+```
+
+Then initialize MemGAS with `llm_provider="vllm"`:
+```python
+from quickstart import MemGASMemory, MemoryConfig
+
+mem = MemGASMemory(
+    MemoryConfig(
+        storage_dir="./memgas_store",
+        embedder="contriever",
+        llm_provider="vllm",
+        llm_model="Qwen/Qwen2.5-7B-Instruct",
+        llm_base_url="http://localhost:8000/v1",
+        llm_api_key="EMPTY",        
+        default_mode="memgas",
+    )
+)
+```
+
+
+### 2) Add Sessions
+`session` should be `list[str]`. Each element can be plain text or a dialogue turn (for example, `"[User]: ... [AI]: ..."`).
+Internally, the system calls an LLM to generate `summary` and `keywords`, then builds multi-granularity vector representations.
+
+```python
+session = [
+    "[User]: I moved to Seattle last month. [AI]: How is the weather there?",
+    "I started a new job at a robotics startup and commute by bike.",
+]
+
+memory_id = mem.add(
+    session=session,
+    conversation_id="user_001", # optional; if omitted, retrieval runs globally
+    metadata={"source": "demo"},
+)
+
+# add another session as a new memory entry
+memory_id_2 = mem.add(
+    conversation_id="user_001",
+    session=[
+        "[User]: I moved to Seattle in January. [AI]: Nice change!",
+        "I now work on robot navigation systems.",
+    ],
+)
+```
+
+### 3) Retrieve
+```python
+hits = mem.retrieve(
+    query="Where did I move recently and what is my new job?",
+    topk=3,
+    conversation_id="user_001",  # optional; if omitted, retrieval runs globally
+    mode="memgas",
+)
+
+for hit in hits:
+    print(hit["memory_id"], hit["score"])
+    print("summary:", hit["summary"])
+    print("keywords:", hit["keywords"])
+```
+
+### 4) Persistence
+```python
+mem.save()  # manual save; add also auto-saves by default
+```
+
+
+## Reproduce 
 
 ### Data Process
 Download the original data:
@@ -94,3 +188,16 @@ cd src/evaluation/
 python eval_query_type.py --eval_file ../../generation_logs/locomo10-contriever-memgas_filter-gpt-4o-mini-topk_3.jsonl
 ```
 
+## Citation
+If you find this work useful, please cite:
+
+```bibtex
+@inproceedings{
+xu2026from,
+title={From Single to Multi-Granularity: Toward Long-Term Memory Association and Selection of Conversational Agents},
+author={Derong Xu and Yi Wen and Pengyue Jia and Yingyi Zhang and Wenlin Zhang and Yichao Wang and Huifeng Guo and Ruiming Tang and Xiangyu Zhao and Enhong Chen and Tong Xu},
+booktitle={The Fourteenth International Conference on Learning Representations},
+year={2026},
+url={https://openreview.net/forum?id=i2yIvZARnG}
+}
+```

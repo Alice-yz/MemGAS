@@ -1,7 +1,4 @@
-locomo10 
+## Datasets
 
-longmemeval_s 
+The original datasets and processed datasets can be found in `git clone https://huggingface.co/datasets/derongxuaa/MemGAS_data`
 
-longmemeval_m 
-
-LongMTBench+
