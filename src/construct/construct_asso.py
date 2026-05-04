@@ -6,7 +6,10 @@ import json
 from sklearn.mixture import GaussianMixture
 import argparse
 import os
-from construct_emb import emb_rawdata
+try:
+    from src.construct.construct_emb import emb_rawdata
+except ImportError:
+    from construct_emb import emb_rawdata
 
 def gmm_edge(sim_scores,mem_threshold,n_components):
     sim_scores = sim_scores.numpy()
@@ -46,11 +49,15 @@ def get_edges(cur_mem, cur_mem_idx, pre_mem, mem_threshold, n_components):
 def construct_asso(args):    
     
     in_data = json.load(open(f'../../data/process_data/{args.dataset}.json'))
-    all_emb = torch.load(f'../../data/process_embs/{args.dataset}-{args.retriever}-emb.pt')
-    if os.path.exists(f'../../data/process_embs/{args.dataset}-{args.retriever}-emb.pt'):
-        all_emb = torch.load()
+    emb_path = f'../../data/process_embs/{args.dataset}-{args.retriever}-emb.pt'
+    if os.path.exists(emb_path):
+        all_emb = torch.load(emb_path)
     else:
-        all_emb = emb_rawdata(args.dataset, args.retriever)
+        all_emb = emb_rawdata(
+            args.dataset,
+            args.retriever,
+            emb_batch_size=getattr(args, "emb_batch_size", 16),
+        )
 
     covid2graph = {}
     for entry, emb in tqdm(zip(in_data,all_emb), total=min(len(in_data), len(all_emb))):
@@ -99,6 +106,7 @@ def construct_asso(args):
     
     os.makedirs("../../graph_cache", exist_ok=True)
     torch.save(covid2graph,f"../../graph_cache/graph-{args.dataset}-{args.retriever}-{args.mem_threshold}-{args.n_components}.pt")
+    return covid2graph
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

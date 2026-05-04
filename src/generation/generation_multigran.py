@@ -2,22 +2,20 @@
 import argparse
 import json
 import os
+import sys
+from time import perf_counter
 
 from metrics import evaluate_match, evaluate_sim
 from tqdm import tqdm
-from utils import LocalLLM, OpenAILLM
 from async_llm import run_async
+from prompt_templates import build_answer_messages
 import asyncio
-import aiohttp
 
-PROMPT_G = """
-You are an intelligent dialog bot. You will be shown History Dialogs. Please read, memorize, and understand the given Dialogs, then generate one concise, coherent and helpful response for the Question.
+current_dir = os.path.dirname(os.path.abspath(__file__))
+repo_root = os.path.abspath(os.path.join(current_dir, "../.."))
+sys.path.insert(0, repo_root)
+from src.profiling_utils import append_profile_record, sum_usage
 
-History Dialogs: {retrieved_texts}
-
-Question Date: {question_date}
-Question: {question}
-"""
 # locomo10 longmemeval_s longmemeval_m LongMTBench+
 # python generation_multigran.py --dataset longmemeval_m --retriever contriever --model_name_or_path gpt-4o-mini --topk 3 --method memgas
 
@@ -27,6 +25,9 @@ parser.add_argument('--retriever', type=str, required=True)
 parser.add_argument("--model_name_or_path", type=str, default="gpt-4o-mini")
 parser.add_argument('--topk', type=int, required=True)
 parser.add_argument('--method', type=str, required=True)
+parser.add_argument('--run_id', type=str, default=None)
+parser.add_argument('--profile_path', type=str, default=None)
+parser.add_argument('--llm_concurrency', type=int, default=4)
 
 args = parser.parse_args()
 os.makedirs("../../generation_logs/", exist_ok=True)
@@ -109,23 +110,62 @@ for idx, sample in enumerate(tqdm(retrieved_data)):
     prompt = PROMPT_Multigran.format(retrieved_texts=retrieved_texts, question=sample["question"], question_date=sample["question_date"])
     async_prompts.append(prompt)
 
-async_responses = asyncio.run(run_async(async_prompts))
+stage_started_at = perf_counter()
+filter_results = asyncio.run(
+    run_async(
+        async_prompts,
+        args.model_name_or_path,
+        return_usage=True,
+        max_concurrency=args.llm_concurrency,
+    )
+)
+filter_wall_time_s = perf_counter() - stage_started_at
+filter_usage = sum_usage([result.get("usage") for result in filter_results if isinstance(result, dict)])
+append_profile_record(
+    dataset=args.dataset,
+    stage="memgas_filter_llm",
+    included_in_memgas_cost=True,
+    wall_time_s=filter_wall_time_s,
+    api_latency_s=sum(result.get("api_latency_s", 0) for result in filter_results if isinstance(result, dict)),
+    call_count=len(filter_results),
+    run_id=args.run_id,
+    profile_path=args.profile_path,
+    usage_available=all(isinstance(result, dict) and bool(result.get("usage")) for result in filter_results),
+    **filter_usage,
+)
 
 async_prompts = []
 for idx, sample in enumerate(tqdm(retrieved_data)):
-    ids2session = conv2sessions[sample["conversation_id"]]
-    retrieved_texts = ""
-    for retrieved_sess in sample['retrieval_results']['ranked_items'][:args.topk]:
-        session = ids2session[retrieved_sess['corpus_id']]
-        retrieved_texts += f"\n### Session Date: {retrieved_sess['timestamp']}\nSession Content:\n{async_responses[idx]}\n"
-    prompt = PROMPT_G.format(retrieved_texts=retrieved_texts, question=sample["question"], question_date=sample["question_date"])
-    async_prompts.append(prompt)
+    filtered_memory = filter_results[idx].get("content", "") if isinstance(filter_results[idx], dict) else filter_results[idx]
+    async_prompts.append(build_answer_messages(args.dataset, sample, filtered_memory))
 
-async_responses = asyncio.run(run_async(async_prompts))
+stage_started_at = perf_counter()
+answer_results = asyncio.run(
+    run_async(
+        async_prompts,
+        args.model_name_or_path,
+        return_usage=True,
+        max_concurrency=args.llm_concurrency,
+    )
+)
+answer_wall_time_s = perf_counter() - stage_started_at
+answer_usage = sum_usage([result.get("usage") for result in answer_results if isinstance(result, dict)])
+append_profile_record(
+    dataset=args.dataset,
+    stage="final_answer_llm",
+    included_in_memgas_cost=False,
+    wall_time_s=answer_wall_time_s,
+    api_latency_s=sum(result.get("api_latency_s", 0) for result in answer_results if isinstance(result, dict)),
+    call_count=len(answer_results),
+    run_id=args.run_id,
+    profile_path=args.profile_path,
+    usage_available=all(isinstance(result, dict) and bool(result.get("usage")) for result in answer_results),
+    **answer_usage,
+)
 
 results = []
-for sample, response in zip(retrieved_data, async_responses):
-    sample["response"] = response
+for sample, response in zip(retrieved_data, answer_results):
+    sample["response"] = response.get("content", "") if isinstance(response, dict) else response
     results.append(sample)
 with open(save_path, "w", encoding="utf-8") as f:
     f.writelines([json.dumps(_, ensure_ascii=False) + "\n" for _ in results])

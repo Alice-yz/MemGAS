@@ -83,7 +83,9 @@ def process_locomo10():
         
         newqa = []
         for qaitem in entry['qa']:
-            if 'adversarial_answer' in qaitem:
+            if str(qaitem['category']) == "5":
+                answer = qaitem['answer'] if 'answer' in qaitem else ""
+            elif 'adversarial_answer' in qaitem:
                 answer = qaitem['adversarial_answer']
             else:
                 answer = qaitem['answer']

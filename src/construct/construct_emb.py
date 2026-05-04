@@ -29,10 +29,11 @@ def read_ids2granularity(path):
     return ids2granularity
 
 class EmbeddingModelContriever():
-    def __init__(self):
+    def __init__(self, batch_size=16):
         # if self.args.retriever == 'flat-contriever':
         self.model = AutoModel.from_pretrained('facebook/contriever').to(torch.device('cuda', 0))
         self.tokenizer = AutoTokenizer.from_pretrained('facebook/contriever')
+        self.batch_size = batch_size
 
     def get_emb_contriever(self, expansion_ids, expansion):
         def mean_pooling(token_embeddings, mask):
@@ -42,7 +43,7 @@ class EmbeddingModelContriever():
         
         with torch.no_grad():
             all_docs_vectors = []
-            dataloader = DataLoader(expansion, batch_size=64, shuffle=False)
+            dataloader = DataLoader(expansion, batch_size=self.batch_size, shuffle=False)
             for batch in tqdm(dataloader):
                 inputs = self.tokenizer(batch, padding=True, truncation=True, return_tensors='pt')
                 inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
@@ -78,7 +79,7 @@ class EmbeddingModelSBERT():
             return torch.tensor(all_docs_vectors)
 
 
-def emb_rawdata(dataset, retriever):
+def emb_rawdata(dataset, retriever, emb_batch_size=16):
     os.makedirs('../../data/process_embs/', exist_ok=True)
     data_path=f'../../data/process_data/{dataset}.json'
     save_path=f'../../data/process_embs/{dataset}-{retriever}-emb.pt'
@@ -90,7 +91,7 @@ def emb_rawdata(dataset, retriever):
     
     all_emb = []
     if retriever == 'contriever':
-        emb_model = EmbeddingModelContriever()
+        emb_model = EmbeddingModelContriever(batch_size=emb_batch_size)
     elif retriever == 'mpnet' or retriever == 'minilm' or retriever == 'qaminilm':
         emb_model = EmbeddingModelSBERT(retriever)
     for conversation in tqdm(in_data):

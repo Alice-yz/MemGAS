@@ -1,10 +1,17 @@
 import os
 import json
+import argparse
+import sys
+from time import perf_counter
 from tqdm import tqdm
 from openai import OpenAI
 import openai
 import backoff
-import tiktoken
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+repo_root = os.path.abspath(os.path.join(current_dir, "../.."))
+sys.path.insert(0, repo_root)
+from src.profiling_utils import append_profile_record, sum_usage, usage_to_dict
 
 client = OpenAI(
     api_key="",
@@ -17,7 +24,7 @@ def chat_completions_with_backoff(client, **kwargs):
     return client.chat.completions.create(**kwargs)
 
 
-def summarize_session(entry, model_name, instru_prompt):
+def summarize_session(entry, model_name, instru_prompt, return_usage=False):
     prompt = f"{instru_prompt}\n\n{entry}\n\nYour answer:"
     kwargs = {
         'model': model_name,
@@ -28,14 +35,33 @@ def summarize_session(entry, model_name, instru_prompt):
         'temperature': 0,
         'max_tokens': 500
     }
+    started_at = perf_counter()
     completion = chat_completions_with_backoff(client,**kwargs) 
-    return completion.choices[0].message.content.strip()
+    api_latency_s = perf_counter() - started_at
+    content = completion.choices[0].message.content.strip()
+    if return_usage:
+        usage = getattr(completion, "usage", None)
+        return content, usage_to_dict(usage), api_latency_s, usage is not None
+    return content
 
 
-def granularity_generate(dataset,level):
+def _multigran_dataset_name(dataset):
+    if 'longmemeval' in dataset:
+        return 'longmemeval'
+    return dataset
+
+
+def _session_key(dataset, conv_id, sessid):
+    if 'longmemeval' in dataset:
+        return str(sessid)
+    return f'convid-{str(conv_id)}-sessid-{sessid}'
+
+
+def granularity_generate(dataset, level, run_id=None, profile_path=None):
     model_name = 'gpt-4o-mini'
-    in_data = json.load(open('../../data/process_data/{dataset}.json'))
-    generate_path = '../../multi_granularity_logs/longmemeval-{level}.jsonl'
+    stage_started_at = perf_counter()
+    in_data = json.load(open(f'../../data/process_data/{dataset}.json'))
+    generate_path = f'../../multi_granularity_logs/{_multigran_dataset_name(dataset)}-{level}.jsonl'
     
     os.makedirs("../../multi_granularity_logs/", exist_ok=True)
     
@@ -43,8 +69,7 @@ def granularity_generate(dataset,level):
     for sample in tqdm(in_data):
         conv_id = sample["conversation_id"]
         for sessid, sess in zip(sample['sessions_ids'], sample['sessions']):
-            ids2session_text[f'convid-{str(conv_id)}-sessid-{sessid}'] = '\n\n'.join(sess)
-            # ids2session_text[sessid] = '\n\n'.join(sess)
+            ids2session_text[_session_key(dataset, conv_id, sessid)] = '\n\n'.join(sess)
     print(len(ids2session_text))
     
     
@@ -69,20 +94,55 @@ def granularity_generate(dataset,level):
                 results.append(sample)
                 generated_ids.update(sample.keys())
     
+    usages = []
+    api_latency_total_s = 0
+    call_count = 0
+    usage_available = True
     for ids, entry in ids2session_text.items():
         if ids in generated_ids:
             print(f'generated_ids: {ids}')
             continue
-        expansion = summarize_session(entry, model_name, instru_prompt)
+        expansion, usage, api_latency_s, cur_usage_available = summarize_session(entry, model_name, instru_prompt, return_usage=True)
+        usages.append(usage)
+        api_latency_total_s += api_latency_s
+        call_count += 1
+        usage_available = usage_available and cur_usage_available
         print(ids, expansion)
         results.append({ids:expansion})
     
     with open(generate_path, 'w',encoding='utf-8') as f_write:
         f_write.writelines([json.dumps(_, ensure_ascii=False) + "\n" for _ in results])
+    usage_total = sum_usage(usages)
+    append_profile_record(
+        dataset=dataset,
+        stage=f"construct_{level}_llm",
+        included_in_memgas_cost=True,
+        wall_time_s=perf_counter() - stage_started_at,
+        api_latency_s=api_latency_total_s,
+        call_count=call_count,
+        cache_hit=call_count == 0,
+        run_id=run_id,
+        profile_path=profile_path,
+        usage_available=usage_available,
+        **usage_total,
+    )
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Generate multi-granularity memory summaries/keywords.")
+    parser.add_argument('--dataset', action='append', default=None)
+    parser.add_argument('--level', action='append', choices=['summary_level', 'keyword_level'], default=None)
+    parser.add_argument('--run_id', type=str, default=None)
+    parser.add_argument('--profile_path', type=str, default=None)
+    return parser.parse_args()
 
 if __name__ == '__main__':
-    granularity_generate('locomo10','summary_level')
-    granularity_generate('locomo10','keyword_level')
+    args = parse_args()
+    datasets = args.dataset or ['locomo10']
+    levels = args.level or ['summary_level', 'keyword_level']
+    for dataset in datasets:
+        for level in levels:
+            granularity_generate(dataset, level, run_id=args.run_id, profile_path=args.profile_path)
     # granularity_generate('LongMTBench+','summary_level')
     # granularity_generate('LongMTBench+','keyword_level')
     # granularity_generate('longmemeval_s','summary_level')

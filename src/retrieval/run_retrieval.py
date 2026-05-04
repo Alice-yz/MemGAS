@@ -11,12 +11,14 @@ from transformers import AutoModel, AutoTokenizer
 from sklearn.preprocessing import normalize
 from eval_utils import evaluate_retrieval
 import sys
+from time import perf_counter
 current_dir = os.path.dirname(os.path.abspath(__file__))
 src_path = os.path.abspath(os.path.join(current_dir, "../../"))
 sys.path.insert(0, src_path)
 
 from src.construct.construct_emb import emb_rawdata
 from src.construct.construct_asso import construct_asso
+from src.profiling_utils import append_profile_record
 
 def run_ppr(g,reset_prob, damping):
     reset_prob = np.where(np.isnan(reset_prob) | (reset_prob < 0), 0, reset_prob)
@@ -43,6 +45,9 @@ def parse_args():
     parser.add_argument('--n_components', type=int, default=2, help="Control the number of GMM clustering categories.")
     parser.add_argument('--damping', type=float, default=0.1, help="")
     parser.add_argument('--temp', type=float, default=0.1, help="")
+    parser.add_argument('--run_id', type=str, default=None)
+    parser.add_argument('--profile_path', type=str, default=None)
+    parser.add_argument('--emb_batch_size', type=int, default=16)
     return parser.parse_args()
 
 
@@ -63,19 +68,48 @@ def multi_granularity_routing(args, query_emb, granular_embeddings):
     return soft_router_weights
 
 def main(args):
-    if os.path.exists(f'../../data/process_embs/{args.dataset}-{args.retriever}-emb.pt'):
-        all_emb = torch.load()
+    emb_path = f'../../data/process_embs/{args.dataset}-{args.retriever}-emb.pt'
+    stage_started_at = perf_counter()
+    if os.path.exists(emb_path):
+        all_emb = torch.load(emb_path)
+        emb_cache_hit = True
     else:
-        all_emb = emb_rawdata(args.dataset, args.retriever)
+        all_emb = emb_rawdata(args.dataset, args.retriever, emb_batch_size=args.emb_batch_size)
+        emb_cache_hit = False
+    append_profile_record(
+        dataset=args.dataset,
+        stage="embedding_load_or_build",
+        included_in_memgas_cost=args.method == "memgas",
+        wall_time_s=perf_counter() - stage_started_at,
+        call_count=0,
+        cache_hit=emb_cache_hit,
+        run_id=args.run_id,
+        profile_path=args.profile_path,
+    )
     
     in_data = json.load(open(f'../../data/process_data/{args.dataset}.json'))
     
     if args.method == 'memgas':
-        if os.path.exists(f"../../graph_cache/graph-{args.dataset}-{args.retriever}-{args.mem_threshold}-{args.n_components}.pt"):
-            covid2graph = torch.load(f"../../graph_cache/graph-{args.dataset}-{args.retriever}-{args.mem_threshold}-{args.n_components}.pt")
+        graph_path = f"../../graph_cache/graph-{args.dataset}-{args.retriever}-{args.mem_threshold}-{args.n_components}.pt"
+        stage_started_at = perf_counter()
+        if os.path.exists(graph_path):
+            covid2graph = torch.load(graph_path)
+            graph_cache_hit = True
         else:
             covid2graph = construct_asso(args)
+            graph_cache_hit = False
+        append_profile_record(
+            dataset=args.dataset,
+            stage="association_graph_load_or_build",
+            included_in_memgas_cost=True,
+            wall_time_s=perf_counter() - stage_started_at,
+            call_count=0,
+            cache_hit=graph_cache_hit,
+            run_id=args.run_id,
+            profile_path=args.profile_path,
+        )
     results = []
+    retrieval_started_at = perf_counter()
     for entry, emb in zip(in_data,all_emb):
         assert entry['conversation_id'] == emb['conversation_id']
         
@@ -174,6 +208,16 @@ def main(args):
                         'ndcg_any@{}'.format(k): ndcg_any
                     })
             results.append(cur_results)
+    append_profile_record(
+        dataset=args.dataset,
+        stage=f"retrieval_{args.method}",
+        included_in_memgas_cost=args.method == "memgas",
+        wall_time_s=perf_counter() - retrieval_started_at,
+        call_count=sum(len(entry['qa']) for entry in in_data),
+        cache_hit=False,
+        run_id=args.run_id,
+        profile_path=args.profile_path,
+    )
             
     if args.dataset != "LongMTBench+":
         refine_results = []
